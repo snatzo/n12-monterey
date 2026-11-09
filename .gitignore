@@ -1,0 +1,25 @@
+# Built tools (produced by `make -C tools`; shipped as source, not binaries)
+/tools/n12_agent
+/tools/n12_layout
+/tools/n12_default
+/tools/n12_fmt
+/tools/n12_play
+/tools/n12_capture
+/tools/sysplay
+/tools/n12_watch
+/tools/n12_aqtest
+/tools/fw_read
+/tools/fw_wtest
+/tools/mlan_probe
+/tools/n12_ports
+/tools/n12_diag
+/tools/n12_midi
+/tools/n12_midi_dev
+/tools/audiovol
+/tools/setout
+/tools/yamaha_fw_start
+
+# Local noise
+*.log
+*.o
+.DS_Store

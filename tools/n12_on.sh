@@ -56,10 +56,17 @@ logfile="/tmp/n12_agent.log"
 
 want_default=0
 want_stereo=0
+want_rate=""
 for a in "$@"; do
     [[ "$a" == "--default" ]] && want_default=1
     [[ "$a" == "--stereo" ]] && want_stereo=1
+    [[ "$a" == --rate=* ]] && want_rate="${a#--rate=}"
 done
+
+# The agent takes --rate=N; in zsh an unquoted empty expansion adds no argument,
+# so this is either "--rate=N" or nothing at all.
+rate_flag=""
+[[ -n "$want_rate" ]] && rate_flag="--rate=$want_rate"
 
 # --- stop any previous agent, and wait for the driver to let the device go ---
 # Kill by pidfile first, then by process name: an agent started by hand (for an
@@ -101,7 +108,7 @@ echo "starting n12_agent..."
 #       device become desk inputs 1-2 (fed from DAW IN 7-8), which is what the
 #       desk's stereo bus listens to.
 if (( want_stereo )); then
-    ./n12_agent --in-channel=16 --out-channel=1 --out-offset=6 --out-chans=2 >"$logfile" 2>&1 &
+    ./n12_agent --in-channel=16 --out-channel=1 $rate_flag --out-offset=6 --out-chans=2 >"$logfile" 2>&1 &
 else
     # The Mojave order (docs/HOW-IT-WORKS.md):
     #   outputs 1-2  -> DAW IN 1-2   -> the desk's MAIN bus (no channel strip):
@@ -113,7 +120,7 @@ else
     # track is 3-4, which is desk channel 1-2 - matching Mojave exactly. The input
     # map mirrors the desk's transmit so DAW OUT 15/16 (the stereo bus) lands on
     # Mac inputs 15/16 for recording.
-    ./n12_agent --in-channel=16 --out-channel=1 \
+    ./n12_agent --in-channel=16 --out-channel=1 $rate_flag \
         --out-map=0,1,6,7,8,9,10,11,12,13,2,3,4,5 \
         --in-map=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 >"$logfile" 2>&1 &
 fi

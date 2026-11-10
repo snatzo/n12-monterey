@@ -14,9 +14,8 @@ xcode-select --install      # if this says "already installed", you are set
 ### Yamaha's driver (the kernel side)
 
 This project drives Yamaha's driver; it does not include it. Install the official
-**Yamaha Steinberg FW Driver** for your n-series device (the version that matches
-your macOS — for Monterey, the 64-bit "Tools for n" / "Yamaha Steinberg FW
-Driver" package). After installing, confirm the pieces are present:
+**Yamaha Steinberg FW Driver** for your n-series device (the 64-bit build for
+Monterey or later). After installing, confirm the pieces are present:
 
 ```sh
 ls /Library/Extensions/YamahaFW*.kext
@@ -44,12 +43,13 @@ must be loaded after every reboot. This is the one step that needs your password
 sudo tools/try_kextload.sh --bypass
 ```
 
-Expected: it reports the Yamaha kexts loaded. If it complains, check that the
-driver from step 0 is installed.
+Expected: it reports the Yamaha kexts loaded. The script uses the copy already
+installed in `/Library/Extensions` if there is one, otherwise it extracts the
+kexts from a Yamaha package you point it at with `PKG=/path/to/….pkg`.
 
 > Want this automatic? `./install.sh --auto-start` installs a small root daemon
-> that loads the kexts at boot (and a login item that starts the device). See
-> *Auto-start* below.
+> that loads the kexts at boot, and a login item that starts the device. See
+> *Auto-start after reboot* below.
 
 ## 3. Start the device
 
@@ -101,14 +101,44 @@ never needs it.
 ./install.sh --auto-start           # installs the launchd jobs (sudo for the daemon)
 ```
 
-This installs:
+This installs two jobs:
 
-* `~/Library/LaunchAgents/com.n12monterey.agent.plist` — runs `n12_on.sh --default`
-  at login;
+* `~/Library/LaunchAgents/com.n12monterey.agent.plist` — brings the device up at
+  login and makes it the Mac's output;
 * `/Library/LaunchDaemons/com.n12monterey.kexts.plist` — loads the Yamaha kexts at
   boot (this is the one that needs your password to install).
 
-Remove them again with `./install.sh --uninstall`.
+### Why the jobs run from a copy, not from this folder
+
+macOS adds two wrinkles that the installer handles for you, and it helps to know
+they exist:
+
+1. **Privacy (TCC).** A launchd job is *not allowed to read files in `~/Documents`,
+   `~/Desktop` or `~/Downloads`* — it fails with `can't open input file`. So the
+   installer puts a copy of the tools in
+   `~/Library/Application Support/n12-monterey` (not protected) and points the
+   jobs there. Moving or deleting this checkout later will not break the
+   auto-start.
+
+2. **launchd reaps the job's leftover processes.** `tools/n12_on.sh` starts the
+   agent in the background and exits — perfect for a Terminal, but launchd kills
+   a job's remaining processes when the job's main process exits, so the device
+   would vanish. The login job therefore runs `tools/n12_launchd.sh`, a thin
+   wrapper that brings the device up and then **stays alive for as long as the
+   agent runs**.
+
+To test the login job without logging out:
+
+```sh
+launchctl kickstart -k "gui/$(id -u)/com.n12monterey.agent"
+sleep 20
+tools/n12_fmt          # expect 14 out / 16 in
+```
+
+The kext daemon only takes effect at a real **reboot** (it is what makes the n12
+present again after the kexts unload at shutdown).
+
+Remove both jobs again with `./install.sh --uninstall`.
 
 ## Troubleshooting
 
@@ -116,26 +146,29 @@ Remove them again with `./install.sh --uninstall`.
 |---|---|
 | `n12_agent` says "service YamahaFWStreamDevice not found" | the kexts are not loaded → step 2 |
 | nothing in System Settings → Sound | desk powered off / FireWire unplugged, or kexts not loaded |
-| you can hear Logic/VLC but **not** Music/QuickTime | run `tools/n12_layout` (n12_on.sh does this) |
+| you can hear Logic/VLC but **not** Music/QuickTime | run `tools/n12_layout` (`n12_on.sh` does this) |
 | a strip is silent | the strip's `[INPUT SELECT]` is on `A.IN` — press `DAW` |
-| audio drifts or clicks | `n12_on.sh` already slaves the Mac to the desk's clock; make sure only one thing is selected as the Mac's output |
+| audio drifts or clicks | `n12_on.sh` slaves the Mac to the desk's clock; make sure only the n12 is the Mac's output |
+| after reboot the device is missing | the kexts did not load — check `/tmp/n12_monterey.kexts.log`, or run `sudo tools/try_kextload.sh --bypass` |
+| the login job does nothing | check `/tmp/n12_monterey.agent.log`; it must not say `can't open input file` (see *Auto-start* above) |
 
 Diagnostics that come in handy:
 
 ```sh
 tools/n12_fmt          # what channels/formats CoreAudio sees
 tools/n12_ports        # the desk's port names, if present
-tools/n12_watch 5      # per-channel levels while something plays (n12 output)
+tools/n12_watch 5      # per-channel levels while something plays
 tools/n12_capture      # record from the n12 and show per-channel levels
 ```
 
 ## Uninstalling
 
 ```sh
-./install.sh --uninstall    # remove the launchd jobs
+./install.sh --uninstall    # remove the launchd jobs AND the installed copy
 tools/n12_off.sh            # stop the running agent now
 rm -rf n12-monterey         # remove the checkout (and its built tools)
 ```
 
-Yamaha's driver is untouched by any of this; remove it with Yamaha's own
-uninstaller if you want it gone.
+`--uninstall` removes both job plists and the
+`~/Library/Application Support/n12-monterey` copy. Yamaha's driver is untouched by
+any of this; remove it with Yamaha's own uninstaller if you want it gone.

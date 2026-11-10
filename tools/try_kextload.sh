@@ -43,7 +43,7 @@ set -u
 # If you have already installed Yamaha's driver, the kexts are in
 # /Library/Extensions and no package is needed - this script uses them directly.
 # Otherwise it looks for a downloaded Yamaha "…Driver…pkg" in ~/Downloads.
-PKG="${PKG:-$(ls "$HOME"/Downloads/*Yamaha*Driver*.pkg 2>/dev/null | head -1)}"
+PKG="${PKG:-$(ls "${HOME:-}"/Downloads/*Yamaha*Driver*.pkg 2>/dev/null | head -1)}"
 
 # Scratch area for the staged, root-owned kexts. Kept out of the project so a
 # mis-set permission here can never affect the source tree.

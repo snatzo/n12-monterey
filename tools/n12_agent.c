@@ -43,6 +43,7 @@
 #include <unistd.h>
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreMIDI/CoreMIDI.h>
 #include <IOKit/IOKitLib.h>
 
 /* The service the audio driver publishes. */
@@ -545,6 +546,31 @@ static int step_create_midi_plug(io_connect_t conn, uint32_t midi_dev,
 }
 
 /*
+ * True if CoreMIDI already lists a port whose name looks like the desk. Used to
+ * decide whether MIDIServer needs a prod (see build_midi).
+ */
+static int desk_midi_ports_present(void)
+{
+    for (int pass = 0; pass < 2; pass++) {
+        ItemCount n = pass ? MIDIGetNumberOfDestinations() : MIDIGetNumberOfSources();
+        for (ItemCount i = 0; i < n; i++) {
+            MIDIEndpointRef ep = pass ? MIDIGetDestination(i) : MIDIGetSource(i);
+            CFStringRef nm = NULL;
+            if (MIDIObjectGetStringProperty(ep, kMIDIPropertyDisplayName, &nm) != noErr || !nm) {
+                continue;
+            }
+            char buf[256] = { 0 };
+            CFStringGetCString(nm, buf, sizeof(buf), kCFStringEncodingUTF8);
+            CFRelease(nm);
+            if (strcasestr(buf, "n12") || strcasestr(buf, "mLAN")) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/*
  * Build the MIDI half: device, model ID, one output and one input port, start.
  * Called from main once the audio side is up.
  */
@@ -583,10 +609,21 @@ static void build_midi(io_connect_t conn)
     printf("  sStartMIDIDevice(%u)              -> 0x%08x\n",
            g_state.midi_dev, kr);
 
-    // CoreMIDI's driver plugin builds its ports when it loads, so ask it to
-    // rescan with the device present. It relaunches on demand.
-    system("killall MIDIServer 2>/dev/null");
-    printf("  (restarted MIDIServer so CoreMIDI re-reads the desk's ports)\n");
+    // CoreMIDI publishes a driver's ports when it loads its plugin, so if
+    // MIDIServer is *already running* (it loaded the plugin before our device
+    // existed) it needs a prod. But MIDIServer is on demand - if it is not
+    // running, it will load the plugin with the device present anyway, and
+    // killing it (or killing nothing) only risks disturbing MIDI Studio. So
+    // restart it only in the one case that actually needs it.
+    usleep(300 * 1000);
+    int server_running = (system("pgrep -xq MIDIServer") == 0);
+    if (server_running && !desk_midi_ports_present()) {
+        system("killall MIDIServer 2>/dev/null");
+        printf("  (restarted MIDIServer so CoreMIDI re-reads the desk's ports)\n");
+    } else {
+        printf("  (MIDIServer %s; left alone)\n",
+               server_running ? "has the ports already" : "will load them on next use");
+    }
 }
 
 /*

@@ -38,7 +38,7 @@ ALL = $(CORE) $(TEST) $(RE)
 all: $(ALL)
 
 # --- core ---
-n12_agent:   n12_agent.c   ; $(CC) $(CFLAGS) -o $@ $< $(FW_IOKIT)
+n12_agent:   n12_agent.c   ; $(CC) $(CFLAGS) -o $@ $< $(FW_MIDI_IOKIT)
 n12_layout:  n12_layout.c  ; $(CC) $(CFLAGS) -o $@ $< $(FW_COREAUDIO)
 n12_default: n12_default.c ; $(CC) $(CFLAGS) -o $@ $< $(FW_COREAUDIO)
 n12_fmt:     n12_fmt.c     ; $(CC) $(CFLAGS) -o $@ $< $(FW_COREAUDIO)

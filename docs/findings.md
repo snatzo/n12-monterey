@@ -68,3 +68,18 @@ destinations: n12 mLAN Network 1
 
 `--no-midi` builds the audio device only. `tools/n12_midi_dev` remains the
 standalone way to experiment with the MIDI sequence.
+
+### Not disturbing MIDI Studio (2026-11-10, later)
+
+`MIDIServer` is **on demand**: it starts when a MIDI client connects and quits
+when idle. So the agent must not blindly `killall MIDIServer` on every start - and
+"are the ports present?" is not a safe test either, because with the server down
+CoreMIDI reports no ports at all. The rule the agent now uses is:
+
+* if `MIDIServer` is **not running**, leave it: it will load the plugin with the
+  device present on next use;
+* if it **is running and already has the desk's ports**, leave it;
+* only if it **is running without** the desk's ports, restart it once.
+
+That keeps the desk's MIDI working without closing MIDI Studio (or any other MIDI
+app) out from under the user.

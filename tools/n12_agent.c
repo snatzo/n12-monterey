@@ -69,6 +69,24 @@
 #define SEL_SET_AVAILABLE_RATES    76   // sSetAvailableSampleRates(count, rates[])
 #define SEL_REQUEST_CHANGE_RATE    86
 
+/* MIDI. The desk's MIDI ports are created through the audio driver, then
+ * published by the CoreMIDI driver plugin (YamahaFWMIDI.plugin). */
+#define SEL_CREATE_MIDI_DEVICE     18   // sCreateMIDIDevice, 64B struct -> index
+#define SEL_DISPOSE_MIDI_DEVICE    19
+#define SEL_START_MIDI_DEVICE      25
+#define SEL_STOP_MIDI_DEVICE       26
+#define SEL_CREATE_MIDI_PLUG       27   // sCreateMIDIPlug, 32B struct -> index
+#define SEL_DISPOSE_MIDI_PLUG      28
+#define SEL_SET_MIDI_MODEL_ID      67   // sSetMIDIDeviceModelID(devIndex, modelID)
+
+/* The n12's MIDI model ID, from the Mojave user-client capture (the manager
+ * calls sSetMIDIDeviceModelID(idx, 1048590)). The CoreMIDI plugin reads it to
+ * decide the endpoint layout; with the default 0 it publishes no ports. */
+#define N12_MIDI_MODEL_ID          1048590u
+
+/* --no-midi: skip the MIDI half (the audio device only). */
+static int g_no_midi = 0;
+
 /* Set by --cm-style: build the device the way the vendor connection manager
  * does, with one audio stream per channel. See step_create_stream_cm. */
 static int g_cm_style = 0;
@@ -163,6 +181,36 @@ typedef struct {
 } yfw_create_audio_stream_t;
 _Static_assert(sizeof(yfw_create_audio_stream_t) == 40, "stream param is 40B");
 
+/* 64-byte input of sCreateMIDIDevice. Unlike the audio device, all *three* name
+ * strings are required (device, vendor, model) or the driver returns
+ * kIOReturnBadArgument. */
+typedef struct {
+    uint64_t guid;         // +0x00
+    uint32_t field08;      // +0x08  unknown; 0 works
+    uint32_t field0c;      // +0x0c  unknown; 0 works
+    uint64_t name_size;    // +0x10  device name, bytes incl. the NUL
+    uint64_t name_ptr;     // +0x18
+    uint64_t vendor_size;  // +0x20
+    uint64_t vendor_ptr;   // +0x28
+    uint64_t model_size;   // +0x30
+    uint64_t model_ptr;    // +0x38
+} yfw_create_midi_dev_t;
+_Static_assert(sizeof(yfw_create_midi_dev_t) == 64, "MIDI device param is 64B");
+
+/* 32-byte input of sCreateMIDIPlug - one CoreMIDI port per plug, one direction
+ * each. */
+typedef struct {
+    uint32_t midi_dev;     // +0x00  index from sCreateMIDIDevice
+    uint32_t stream_ref;   // +0x04  optional; 0 allowed
+    uint32_t field08;      // +0x08  unknown; 0 works
+    uint8_t  field0c;      // +0x0c  unknown; 0 works
+    uint8_t  is_input;     // +0x0d  direction flag (0 = output, 1 = input)
+    uint8_t  pad[2];
+    uint64_t name_size;    // +0x10  plug name, bytes incl. the NUL
+    uint64_t name_ptr;     // +0x18
+} yfw_create_midi_plug_t;
+_Static_assert(sizeof(yfw_create_midi_plug_t) == 32, "MIDI plug param is 32B");
+
 /* ------------------------------------------------------------------ state */
 
 /*
@@ -188,6 +236,11 @@ static struct {
     /* The per-channel input build (--in-map): mirror of the output arrays. */
     uint32_t in_map_streams[N12_MAX_STREAMS];
     int      in_map_stream_n;
+    /* The MIDI half: one device and its ports (plugs). */
+    uint32_t midi_dev;
+    uint32_t midi_plugs[8];
+    int      midi_plug_n;
+    int      have_midi_dev;
 } g_state;   /* zero-initialised below; IO_OBJECT_NULL is 0 */
 
 static volatile sig_atomic_t g_stop = 0;
@@ -423,6 +476,120 @@ static int step_create_stream_chan(io_connect_t conn, uint32_t dev_index,
 }
 
 /*
+ * ---------------------------------------------------------------- MIDI -----
+ *
+ * The desk's MIDI ports are built through the same driver, then published by the
+ * CoreMIDI driver plugin (`YamahaFWMIDI.plugin`). The steps are:
+ *
+ *   sCreateMIDIDevice(64B struct)      one MIDI device (needs 3 name strings)
+ *   sSetMIDIDeviceModelID(idx, model)  tells the plugin which model this is
+ *   sCreateMIDIPlug(32B struct)        one port per call, one direction each
+ *   sStartMIDIDevice(idx)
+ *
+ * The plugin builds its port list when it *loads*, so a device created after
+ * MIDIServer started stays invisible until CoreMIDI rescans - which is why the
+ * agent restarts MIDIServer once after building the MIDI device.
+ */
+
+/* Create the MIDI device. Returns its index, or -1. */
+static int step_create_midi_device(io_connect_t conn)
+{
+    static char dev_name[]    = "n12";
+    static char vendor_name[] = "Yamaha";
+    static char model_name[]  = "n12";
+
+    yfw_create_midi_dev_t p;
+    memset(&p, 0, sizeof(p));
+    p.guid        = N12_GUID;
+    p.name_size   = sizeof(dev_name);
+    p.name_ptr    = (uint64_t)(uintptr_t)dev_name;
+    p.vendor_size = sizeof(vendor_name);
+    p.vendor_ptr  = (uint64_t)(uintptr_t)vendor_name;
+    p.model_size  = sizeof(model_name);
+    p.model_ptr   = (uint64_t)(uintptr_t)model_name;
+
+    uint32_t index = 0xffffffff;
+    size_t out = sizeof(index);
+    kern_return_t kr = IOConnectCallStructMethod(conn, SEL_CREATE_MIDI_DEVICE,
+                                                 &p, sizeof(p), &index, &out);
+    printf("  sCreateMIDIDevice                  -> 0x%08x", kr);
+    if (kr == KERN_SUCCESS) {
+        printf("  index=%u", index);
+    }
+    printf("\n");
+    return kr == KERN_SUCCESS ? (int)index : -1;
+}
+
+/* Create one MIDI port (plug). Returns its index, or -1. */
+static int step_create_midi_plug(io_connect_t conn, uint32_t midi_dev,
+                                 int is_input, const char *name)
+{
+    yfw_create_midi_plug_t p;
+    memset(&p, 0, sizeof(p));
+    p.midi_dev  = midi_dev;
+    p.is_input  = (uint8_t)(is_input ? 1 : 0);
+    p.name_size = strlen(name) + 1;
+    p.name_ptr  = (uint64_t)(uintptr_t)name;
+
+    uint32_t index = 0xffffffff;
+    size_t out = sizeof(index);
+    kern_return_t kr = IOConnectCallStructMethod(conn, SEL_CREATE_MIDI_PLUG,
+                                                 &p, sizeof(p), &index, &out);
+    printf("  sCreateMIDIPlug(%s, \"%s\")  -> 0x%08x",
+           is_input ? "in " : "out", name, kr);
+    if (kr == KERN_SUCCESS) {
+        printf("  index=%u", index);
+    }
+    printf("\n");
+    return kr == KERN_SUCCESS ? (int)index : -1;
+}
+
+/*
+ * Build the MIDI half: device, model ID, one output and one input port, start.
+ * Called from main once the audio side is up.
+ */
+static void build_midi(io_connect_t conn)
+{
+    int md = step_create_midi_device(conn);
+    if (md < 0) {
+        fprintf(stderr, "  could not create the MIDI device\n");
+        return;
+    }
+    g_state.midi_dev = (uint32_t)md;
+    g_state.have_midi_dev = 1;
+
+    // The model ID is what makes the CoreMIDI plugin lay the ports out.
+    {
+        uint64_t a[2] = { g_state.midi_dev, (uint64_t)N12_MIDI_MODEL_ID };
+        kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_SET_MIDI_MODEL_ID,
+                                                     a, 2, NULL, NULL);
+        printf("  sSetMIDIDeviceModelID(%u,%u)     -> 0x%08x\n",
+               g_state.midi_dev, N12_MIDI_MODEL_ID, kr);
+    }
+
+    // One port each way, named like the desk's CoreMIDI ports.
+    int out = step_create_midi_plug(conn, g_state.midi_dev, 0, "mLAN Network 1");
+    if (out >= 0 && g_state.midi_plug_n < 8) {
+        g_state.midi_plugs[g_state.midi_plug_n++] = (uint32_t)out;
+    }
+    int in = step_create_midi_plug(conn, g_state.midi_dev, 1, "mLAN Network 1");
+    if (in >= 0 && g_state.midi_plug_n < 8) {
+        g_state.midi_plugs[g_state.midi_plug_n++] = (uint32_t)in;
+    }
+
+    uint64_t d = g_state.midi_dev;
+    kern_return_t kr = IOConnectCallScalarMethod(conn, SEL_START_MIDI_DEVICE,
+                                                 &d, 1, NULL, NULL);
+    printf("  sStartMIDIDevice(%u)              -> 0x%08x\n",
+           g_state.midi_dev, kr);
+
+    // CoreMIDI's driver plugin builds its ports when it loads, so ask it to
+    // rescan with the device present. It relaunches on demand.
+    system("killall MIDIServer 2>/dev/null");
+    printf("  (restarted MIDIServer so CoreMIDI re-reads the desk's ports)\n");
+}
+
+/*
  * Undo everything, in the order the driver expects.
  *
  * This ordering matters and getting it wrong crashes the machine. The audio
@@ -469,6 +636,19 @@ static void teardown(void)
     if (g_state.have_in_stream) {
         uint64_t s = g_state.in_stream;
         IOConnectCallScalarMethod(conn, SEL_DISPOSE_AUDIO_STREAM, &s, 1, NULL, NULL);
+    }
+
+    // MIDI: the plugs, then the MIDI device. Middle of the chain - after the
+    // audio streams, before the isochronous parameters and the device.
+    for (int i = g_state.midi_plug_n - 1; i >= 0; i--) {
+        uint64_t p = g_state.midi_plugs[i];
+        IOConnectCallScalarMethod(conn, SEL_DISPOSE_MIDI_PLUG, &p, 1, NULL, NULL);
+    }
+    g_state.midi_plug_n = 0;
+    if (g_state.have_midi_dev) {
+        uint64_t md = g_state.midi_dev;
+        IOConnectCallScalarMethod(conn, SEL_STOP_MIDI_DEVICE, &md, 1, NULL, NULL);
+        IOConnectCallScalarMethod(conn, SEL_DISPOSE_MIDI_DEVICE, &md, 1, NULL, NULL);
     }
 
     // 3. only now the isochronous stream parameters: the extras created for
@@ -623,6 +803,9 @@ int main(int argc, char **argv)
         } else if (strncmp(argv[i], "--dev-type=", 11) == 0) {
             // The device type (0 or 1) sent in sCreateAudioDevice at +0x0c.
             g_dev_type = atoi(argv[i] + 11);
+        } else if (strcmp(argv[i], "--no-midi") == 0) {
+            // Skip the MIDI half; build only the audio device.
+            g_no_midi = 1;
         } else if (strncmp(argv[i], "--in-map=", 9) == 0) {
             // Comma-separated 0-based isochronous subchannels for the input
             // direction, one input stream per entry. See g_in_map above.
@@ -905,6 +1088,12 @@ int main(int argc, char **argv)
         }
     } else {
         printf("  sStartAudioDevice                   (skipped - letting CoreAudio start it)\n");
+    }
+
+    // 5. the MIDI ports (the desk's CoreMIDI IN/OUT), unless --no-midi.
+    if (!g_no_midi) {
+        printf("\nbuilding the MIDI ports:\n");
+        build_midi(g_state.conn);
     }
 
     uint64_t nstreams = 0;

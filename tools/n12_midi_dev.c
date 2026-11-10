@@ -46,6 +46,7 @@
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreMIDI/CoreMIDI.h>
+#include <stdlib.h>   /* system() */
 #include <IOKit/IOKitLib.h>
 
 /* The service the audio driver publishes (same one n12_agent opens). */
@@ -74,6 +75,12 @@
 #define SEL_GET_NUM_MIDI_PLUGS      29
 #define SEL_GET_MIDI_PLUG           30
 #define SEL_GET_MIDI_PLUG_INFO      31
+#define SEL_SET_MIDI_MODEL_ID       67   // sSetMIDIDeviceModelID(idx, modelID)
+
+/* The n12's MIDI model ID, taken from the Mojave capture: the manager calls
+ * sSetMIDIDeviceModelID(deviceIndex, 1048590). Without it the CoreMIDI plugin
+ * opens the nub but publishes no endpoints. */
+#define N12_MIDI_MODEL_ID 1048590u
 
 /* kIOMasterPortDefault is kIOMainPortDefault on macOS 12; same value. */
 #if defined(MAC_OS_VERSION_12_0) && MAC_OS_VERSION_12_0
@@ -153,6 +160,11 @@ static struct {
 
 static volatile sig_atomic_t g_stop = 0;
 static void on_signal(int sig) { (void)sig; g_stop = 1; }
+
+/* The two unknown MIDI-struct fields. The audio device's +0x0c is its TYPE, so
+ * the MIDI device's +0x0c is the prime suspect for the nub's "Type" property. */
+static uint32_t g_field08 = 0;
+static uint32_t g_field0c = 0;
 
 static io_service_t find_service(const char *className)
 {
@@ -265,8 +277,8 @@ static int step_create_midi_device(io_connect_t conn)
     yfw_create_midi_dev_t p;
     memset(&p, 0, sizeof(p));
     p.guid        = N12_GUID;
-    p.field08     = 0;
-    p.field0c     = 0;
+    p.field08     = g_field08;
+    p.field0c     = g_field0c;
     p.name_size   = sizeof(dev_name);
     p.name_ptr    = (uint64_t)(uintptr_t)dev_name;
     p.vendor_size = sizeof(vendor_name);
@@ -399,6 +411,10 @@ int main(int argc, char **argv)
             in_plugs = atoi(argv[i] + 11);
         } else if (strncmp(argv[i], "--run-for=", 10) == 0) {
             run_for = atoi(argv[i] + 10);
+        } else if (strncmp(argv[i], "--field08=", 10) == 0) {
+            g_field08 = (uint32_t)strtoul(argv[i] + 10, NULL, 0);
+        } else if (strncmp(argv[i], "--field0c=", 10) == 0) {
+            g_field0c = (uint32_t)strtoul(argv[i] + 10, NULL, 0);
         } else if (strcmp(argv[i], "--with-audio") == 0) {
             with_audio = 1;
         } else if (strncmp(argv[i], "--out-channel=", 14) == 0) {
@@ -476,6 +492,16 @@ int main(int argc, char **argv)
     g_state.midi_dev = (uint32_t)md;
     g_state.have_midi_dev = 1;
 
+    // 1b. Tell the driver which model this is. The CoreMIDI plugin reads this to
+    //     decide the endpoint layout; with the default 0 it publishes nothing.
+    {
+        uint64_t a[2] = { g_state.midi_dev, (uint64_t)N12_MIDI_MODEL_ID };
+        kr = IOConnectCallScalarMethod(g_state.conn, SEL_SET_MIDI_MODEL_ID,
+                                       a, 2, NULL, NULL);
+        printf("  sSetMIDIDeviceModelID(%u, %u)   -> 0x%08x\n",
+               g_state.midi_dev, N12_MIDI_MODEL_ID, kr);
+    }
+
     // 2. the plugs. Default one output and one input, named like the desk's.
     for (int i = 0; i < out_plugs && g_state.num_plugs < 64; i++) {
         char name[64];
@@ -495,6 +521,13 @@ int main(int argc, char **argv)
     kr = IOConnectCallScalarMethod(g_state.conn, SEL_START_MIDI_DEVICE, &d, 1,
                                    NULL, NULL);
     printf("  sStartMIDIDevice(%u)               -> 0x%08x\n", g_state.midi_dev, kr);
+
+    // CoreMIDI's driver plugin builds its port list when it loads, so a device
+    // created after MIDIServer started is invisible until the server re-scans.
+    // MIDIRestart() turns out not to be enough; bouncing MIDIServer is what
+    // works. It relaunches on demand, so this is safe.
+    int rc = system("killall MIDIServer 2>/dev/null");
+    printf("  restarting MIDIServer               (rc=%d)\n", rc);
 
     // With --with-audio, start the isoch DMA and the audio engine too.
     if (with_audio) {

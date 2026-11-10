@@ -109,6 +109,12 @@ static int g_iso_per_stream = 0;
  * with sSetIsochStreamChannel. -1 means "same as --out-channel". */
 static int g_iso_channel = -1;
 
+/* The device "type" (0 or 1) sent in the sCreateAudioDevice structure at +0x0c.
+ * The driver feeds it to YamahaFWAudioDevice::setType, and the engine only
+ * advertises multiple sample rates when the type is 1. 1 is the correct value
+ * for the n-series; 0 (what we sent at first) makes the device offer 44100 only. */
+static int g_dev_type = 1;
+
 /* --in-map=0,1,2,... builds ONE INPUT AUDIO STREAM PER LISTED CHANNEL, the
  * mirror of --out-map for the desk -> Mac direction. The numbers are 0-based
  * isochronous subchannels (the desk's DAW OUT n is subchannel n-1), and device
@@ -136,7 +142,7 @@ static int g_in_map_n = 0;
 typedef struct {
     uint64_t guid;         // +0x00
     uint32_t field08;      // +0x08  unknown; 0 works
-    uint32_t index;        // +0x0c  <= 1, duplicate key
+    uint32_t type;         // +0x0c  the device TYPE (0 or 1); setType() reads it
     uint64_t name_size;    // +0x10  bytes, including the NUL
     uint64_t name_ptr;     // +0x18  valid in this process
     uint64_t vendor_size;  // +0x20
@@ -214,7 +220,7 @@ static int step_create_device(io_connect_t conn)
     yfw_create_audio_dev_t p;
     memset(&p, 0, sizeof(p));
     p.guid        = N12_GUID;
-    p.index       = 0;
+    p.type        = (uint32_t)g_dev_type;   // field +0x0c: the device type
     p.name_size   = sizeof(dev_name);
     p.name_ptr    = (uint64_t)(uintptr_t)dev_name;
     p.vendor_size = sizeof(vendor_name);
@@ -614,6 +620,9 @@ int main(int argc, char **argv)
             // The channel sSetIsochStreamChannel programs on the per-channel
             // output isochronous parameter(s).
             g_iso_channel = atoi(argv[i] + 14);
+        } else if (strncmp(argv[i], "--dev-type=", 11) == 0) {
+            // The device type (0 or 1) sent in sCreateAudioDevice at +0x0c.
+            g_dev_type = atoi(argv[i] + 11);
         } else if (strncmp(argv[i], "--in-map=", 9) == 0) {
             // Comma-separated 0-based isochronous subchannels for the input
             // direction, one input stream per entry. See g_in_map above.
